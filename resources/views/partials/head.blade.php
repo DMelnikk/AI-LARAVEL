@@ -1,5 +1,6 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="csrf-token" content="{{csrf_token()}}"/>
 
 <title>{{ $title ?? config('app.name') }}</title>
 
@@ -12,3 +13,104 @@
 
 @vite(['resources/css/app.css', 'resources/js/app.js'])
 @fluxAppearance
+
+<script>
+    document.addEventListener('alpine:init', () => {
+       Alpine.data('ticketChatDemo', (ticketId, initialResponse = '') => ({
+           ticketId,
+           prompt: '',
+           response: initialResponse,
+           async send() {
+               const message = this.prompt.trim();
+
+               if(message.length < 3) {
+                   return;
+               }
+
+               this.prompt = '';
+
+               try {
+                   const response = await fetch(`/tickets/${this.ticketId}/ai/chat`, {
+                       method: 'POST',
+                       headers: {
+                           'Content-Type' : 'application/json',
+                           'Accept' : 'application/json',
+                           'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content,
+                       },
+                       body: JSON.stringify({message}),
+                   });
+
+                   const data = await response.json();
+                   if(!response.ok) {
+                       throw new Error(data.message);
+                   }
+
+                   this.response = data.message ?? '';
+
+               } catch (error) {
+                   console.error(error);
+                   this.response = 'Error: ' + error.message;
+               }
+           }
+       }));
+
+       Alpine.data('ticketDraftDemo',(ticketId,initialDraft = '') => ({
+           ticketId,
+           draft: initialDraft,
+           prompt: '',
+           controller: null,
+           async streamDraft() {
+               this.draft = '';
+               this.controller = new AbortController();
+
+               const response = await fetch(`/tickets/${this.ticketId}/ai/draft-reply/stream`, {
+                   method: 'POST',
+                   headers: {
+                       'Accept' : 'text/event-stream',
+                       'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content,
+                   },
+                   signal: this.controller.signal,
+               });
+
+               const reader = response.body.getReader();
+               const decoder = new TextDecoder();
+               let buffer = '';
+
+               while(true) {
+                   const {value, done} = await reader.read();
+                   if(done) break;
+
+                   buffer += decoder.decode(value,{stream: true});
+
+                   const parts = buffer.split('\n\n');
+                   buffer = parts.pop() ?? '';
+
+                   for (const part of parts) {
+                       if(!part.startsWith('data:')) continue;
+                       const payload = part.replace('data: ', '').trim();
+
+                       if(payload === '[DONE]') return;
+
+                       try {
+                           const event = JSON.parse(payload);
+                           if(event.type === 'text_delta') {
+                               this.draft += event.delta;
+                           }
+                       } catch (error) {
+                           console.error(error);
+                       }
+                   }
+               }
+           },
+           cancelStream() {
+               this.controller?.abort();
+           },
+           insertIntoReply() {
+                const replyBox = document.querySelector('[data-ticket-reply]');
+
+                replyBox.value = this.draft;
+                replyBox.dispatchEvent(new Event('input', {bubbles: true}));
+           }
+       }));
+    });
+</script>
